@@ -28,6 +28,8 @@ button { cursor: pointer; font-family: inherit; }
 .tabs { display: flex; padding: 8px; gap: 4px; background: #f0f0f0; }
 .tabs button { flex: 1; border: 0; padding: 8px 2px; border-radius: 6px; background: transparent; font-weight: bold; font-size: 11px; color: #666; }
 .tabs button.active { background: #ffffff; color: var(--line-green); }
+.add-friend-bar { padding: 8px 12px; background: #fff; border-bottom: 1px solid #eee; }
+.add-friend-bar button { width: 100%; border: 1px dashed var(--line-green); background: #f0f9f2; color: var(--line-green); font-weight: bold; padding: 6px; border-radius: 6px; font-size: 12px; }
 .friend-list { overflow-y: auto; flex: 1; }
 .friend { display: flex; align-items: center; gap: 12px; padding: 12px 16px; cursor: pointer; border-bottom: 1px solid #f0f0f0; }
 .friend:hover, .friend.active { background: #ebf7ee; }
@@ -58,7 +60,6 @@ button { cursor: pointer; font-family: inherit; }
 .message-info-wrap { display: flex; flex-direction: column; }
 .message-info { font-size: 10px; color: white; text-shadow: 0 1px 2px rgba(0,0,0,0.3); }
 
-/* リアクション表示 */
 .reactions-wrap { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
 .reaction-pill { background: rgba(255, 255, 255, 0.9); border: 1px solid #ddd; border-radius: 12px; padding: 2px 7px; font-size: 11px; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; box-shadow: 0 1px 2px rgba(0,0,0,0.08); }
 .reaction-pill.active { background: #e6f7ff; border-color: #91d5ff; color: #096dd9; font-weight: bold; }
@@ -125,6 +126,9 @@ button { cursor: pointer; font-family: inherit; }
             <button id="keepTab" onclick="openKeep()">✍️ キープ</button>
             <button id="homeTab" onclick="openHome()">ホーム</button>
         </div>
+        <div class="add-friend-bar">
+            <button onclick="openAddFriendModal()">🔑 合言葉で友だち追加</button>
+        </div>
         <div id="friendList" class="friend-list"></div>
     </aside>
 
@@ -180,13 +184,13 @@ if (firebaseConfig.apiKey !== "YOUR_API_KEY") {
     isOnline = true;
 }
 
-const STORAGE_KEY = "chatleaf_pub_v12";
+const STORAGE_KEY = "chatleaf_pub_v13";
 const DEFAULT_AVATAR = "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='100' height='100'><circle cx='50' cy='50' r='50' fill='%2306C755'/><circle cx='50' cy='40' r='20' fill='%23fff'/><circle cx='50' cy='90' r='35' fill='%23fff'/></svg>";
 const RINRIN_ICON = "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='100' height='100'><circle cx='50' cy='50' r='50' fill='%23ff9a9e'/><circle cx='50' cy='40' r='20' fill='%23fff'/><circle cx='50' cy='90' r='35' fill='%23fff'/></svg>";
 const RINRIN_ID = "bot_rinrin";
 
 let localData = JSON.parse(localStorage.getItem(STORAGE_KEY)) || { currentUser: null, cachedState: null };
-let state = localData.cachedState || { users: {}, group: {}, chats: {}, stamps: {}, homePosts: {}, admins: {}, calls: {}, surveys: {} };
+let state = localData.cachedState || { users: {}, group: {}, chats: {}, stamps: {}, homePosts: {}, admins: {}, calls: {}, surveys: {}, secretCodes: {} };
 
 let currentChat = null;
 let viewMode = "chat";
@@ -240,7 +244,8 @@ function ensureRinrin() {
             icon: RINRIN_ICON,
             coins: 1000,
             blocked: false,
-            isBot: true
+            isBot: true,
+            friends: {}
         };
     }
 }
@@ -263,6 +268,7 @@ function init() {
             state.admins = data.admins || state.admins || {};
             state.calls = data.calls || {};
             state.surveys = data.surveys || state.surveys || {};
+            state.secretCodes = data.secretCodes || state.secretCodes || {};
             ensureRinrin();
             saveStateLocally();
             render();
@@ -324,7 +330,15 @@ async function register() {
     const icon = await readFile(document.getElementById("regIcon").files[0]) || DEFAULT_AVATAR;
     const uid = createId();
 
-    const newUser = { id: uid, name: name, icon: icon, coins: 100, blocked: false };
+    const newUser = {
+        id: uid,
+        name: name,
+        icon: icon,
+        coins: 100,
+        blocked: false,
+        friends: { [RINRIN_ID]: true } // AIアシスタントは初期で友だちに追加
+    };
+
     state.users[uid] = newUser;
     localData.currentUser = uid;
     saveStateLocally();
@@ -339,6 +353,69 @@ function logout() {
     saveStateLocally();
     currentChat = null;
     openAuthModal();
+}
+
+/* --- 合言葉で友だち追加機能 --- */
+function openAddFriendModal() {
+    modal(`
+        <h2>🔑 合言葉で友だち追加</h2>
+        <p style="font-size:12px; color:#666; margin-bottom:12px;">友達と同じ「合言葉」を入力すると、お互いの友だちリストに自動で追加されます。</p>
+        <label>合言葉を入力</label>
+        <input id="secretCodeInput" placeholder="例：ひみつの部屋123" onkeydown="if(event.key==='Enter') addFriendByCode()">
+        <button class="green" style="width:100%; padding:10px; margin-top:10px;" onclick="addFriendByCode()">友だち追加する</button>
+        <button style="width:100%; margin-top:6px;" onclick="closeModal()">キャンセル</button>
+    `);
+}
+
+function addFriendByCode() {
+    const codeInput = document.getElementById("secretCodeInput");
+    const code = codeInput ? codeInput.value.trim() : "";
+    if (!code) return alert("合言葉を入力してください");
+
+    const myUid = localData.currentUser;
+    if (!state.secretCodes) state.secretCodes = {};
+    if (!state.secretCodes[code]) state.secretCodes[code] = {};
+
+    // 自分のUIDを合言葉に追加
+    state.secretCodes[code][myUid] = true;
+
+    // 同じ合言葉に登録されている他のユーザーIDを取得
+    const memberUids = Object.keys(state.secretCodes[code]);
+
+    let addedCount = 0;
+    memberUids.forEach(uid => {
+        if (uid === myUid) return;
+        
+        // 自分と相手の互いのfriendsリストに追加
+        if (!me().friends) me().friends = {};
+        if (!state.users[uid]) return;
+        if (!state.users[uid].friends) state.users[uid].friends = {};
+
+        if (!me().friends[uid]) {
+            me().friends[uid] = true;
+            state.users[uid].friends[myUid] = true;
+            addedCount++;
+
+            if (isOnline) {
+                db.ref(`users/${myUid}/friends/${uid}`).set(true);
+                db.ref(`users/${uid}/friends/${myUid}`).set(true);
+            }
+        }
+    });
+
+    if (isOnline) {
+        db.ref(`secretCodes/${code}/${myUid}`).set(true);
+    }
+
+    saveStateLocally();
+    closeModal();
+    render();
+
+    if (addedCount > 0) {
+        alert(`合言葉「${code}」で ${addedCount} 人の友だちが追加されました！`);
+    } else {
+        alert(`合言葉「${code}」を登録しました！相手も同じ合言葉を入力すると友だちに追加されます。`);
+    }
 }
 
 function updateTabButtons(activeTabId) {
@@ -369,7 +446,14 @@ function render() {
 
 function renderFriends() {
     const list = document.getElementById("friendList");
-    const friends = Object.values(state.users).filter(u => u.id !== localData.currentUser && !u.blocked);
+    const myFriendsObj = me()?.friends || {};
+
+    // 自分以外で、myFriendsObjに含まれるユーザーのみ表示
+    const friends = Object.values(state.users).filter(u => 
+        u.id !== localData.currentUser && 
+        !u.blocked && 
+        (myFriendsObj[u.id] || u.isBot) // りんりんBotまたは友だち登録済みユーザー
+    );
 
     list.innerHTML = friends.map(u => `
         <div class="friend ${currentChat === u.id && viewMode === 'chat' ? 'active':''}" onclick="openChat('${u.id}')">
@@ -377,6 +461,10 @@ function renderFriends() {
             <div><b>${escapeHTML(u.name)}</b></div>
         </div>
     `).join("");
+
+    if (friends.length === 0) {
+        list.innerHTML = `<div style="padding:20px; text-align:center; color:#888; font-size:12px;">「合言葉で友だち追加」からお友達を追加してください</div>`;
+    }
 }
 
 function openChat(id) {
@@ -509,7 +597,6 @@ function renderMessages() {
     box.scrollTop = box.scrollHeight;
 }
 
-/* --- 長押しメニュー & リアクション機能 --- */
 function handlePressStart(msgId) {
     isLongPressAction = false;
     pressTimer = setTimeout(() => {
@@ -713,7 +800,6 @@ async function sendImageMessage(input) {
     input.value = "";
 }
 
-/* --- 音声メッセージ & 文字起こし --- */
 async function toggleAudioRecording() {
     const recBtn = document.getElementById("recBtn");
     if(!isRecordingAudio) {
@@ -808,7 +894,6 @@ function getOwnedArray(stamp) {
     return Array.isArray(stamp.owned) ? stamp.owned : Object.values(stamp.owned);
 }
 
-/* 文字絵文字・画像絵文字をテキスト入力欄に追加する関数 */
 function insertEmojiToInput(textOrCode) {
     const input = document.getElementById("messageInput");
     if(!input) return;
@@ -832,12 +917,10 @@ function renderStampPicker() {
     picker.innerHTML = myStamps.map(s => {
         const isEmoji = s.itemType === 'emoji';
         if (isEmoji) {
-            // 画像がある場合は画像、無い場合はテキスト（文字絵文字）を表示
             const previewHtml = s.image
                 ? `<img src="${escapeHTML(s.image)}">`
                 : `<span style="font-size:22px;">${escapeHTML(s.name)}</span>`;
             
-            // 画像が無い場合は名前(文字)を直接入力欄へ、画像がある場合は[emoji:ID]形式で入力欄へ挿入
             const insertValue = s.image ? `[emoji:${s.id}]` : s.name;
 
             return `
@@ -858,7 +941,6 @@ function renderStampPicker() {
 
 function toggleStampPicker() { document.getElementById("stampPicker").classList.toggle("active"); }
 
-/* --- ショップ画面 --- */
 function openStamps(tab = 'buy') {
     const stamps = Object.values(state.stamps);
 
@@ -939,7 +1021,7 @@ async function sellStamp() {
         id: createId(),
         owner: localData.currentUser,
         name: name,
-        image: img, // 画像なし（文字絵文字）の場合は null
+        image: img,
         price: price,
         itemType: type,
         owned: [localData.currentUser]
